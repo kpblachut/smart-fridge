@@ -25,9 +25,13 @@ class Recipe(db.Model):
 class Fridge(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
-    status = db.Column(db.String(50), nullable=False, check_constraint="status IN ('available', 'used', 'restored')")
+    status = db.Column(db.String(50), nullable=False)
     quantity = db.Column(db.Numeric(10, 2), nullable=False)
     added_date = db.Column(db.Date, default=db.func.current_date)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('available', 'used', 'restored')", name="status_check"),
+    )
 
 class RecipeProduct(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -39,9 +43,11 @@ class RecipeProduct(db.Model):
 # YOLO model
 model = YOLO('best.pt')
 
-@app.before_first_request
+@app.before_request
 def create_tables():
-    db.create_all()
+    if not hasattr(app, 'db_initialized'):
+        db.create_all()
+        app.db_initialized = True
 
 @app.route('/video_feed', methods=['POST'])
 def video_feed():
