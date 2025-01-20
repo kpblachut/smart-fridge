@@ -1,0 +1,606 @@
+// app/screens/CameraScreen.js
+
+import React, { useState, useRef } from 'react';
+import {
+  StyleSheet,
+  Text,
+  View,
+  TouchableOpacity,
+  Alert,
+  Modal,
+  TouchableWithoutFeedback,
+  ActivityIndicator
+} from 'react-native';
+import { Camera } from 'expo-camera'; // Zwróć uwagę na import
+import { useProducts } from '../../components/ProductsContext'; // O ile używasz local state
+// import { CameraView, useCameraPermissions } from 'expo-camera'; // lub inna biblioteka – zależnie od Twojej konfiguracji
+
+// Dostosuj IP do własnego serwera
+const ML_MODEL_URL = 'http://192.168.1.237:5000/detect';
+const API_URL = 'http://192.168.1.237:5000/api';
+
+
+export default function CameraScreen({ navigation }) {
+  const [permission, requestPermission] = Camera.useCameraPermissions();
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [detectedProducts, setDetectedProducts] = useState([]);
+  const [showProductInfo, setShowProductInfo] = useState(false);
+  const [selectedLabel, setSelectedLabel] = useState(null);
+  const cameraRef = useRef(null);
+
+  // Jeśli używasz kontekstu do dodawania produktów lokalnie:
+  const { addProduct } = useProducts(); // ewentualnie
+
+  if (!permission?.granted) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.message}>Potrzebujemy dostępu do kamery</Text>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={requestPermission}
+        >
+          <Text style={styles.text}>Przyznaj dostęp</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  const sendFrameToModel = async () => {
+    if (!cameraRef.current || isProcessing) return;
+
+    try {
+      setIsProcessing(true);
+      setDetectedProducts([]);
+
+      // Zrobienie zdjęcia
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.7,
+        base64: false
+      });
+
+      // Przygotowanie danych do wysłania
+      const formData = new FormData();
+      formData.append('image', {
+        uri: photo.uri,
+        type: 'image/jpeg',
+        name: 'frame.jpg'
+      });
+
+      // Wysłanie klatki do modelu ML
+      const response = await fetch(ML_MODEL_URL, {
+        method: 'POST',
+        body: formData,
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+
+      // Otrzymujemy listę obiektów
+      const detections = await response.json();
+      setDetectedProducts(detections);
+
+    } catch (error) {
+      console.error('Error sending frame to model:', error);
+      Alert.alert(
+        "Błąd",
+        "Wystąpił problem podczas rozpoznawania produktów"
+      );
+      setDetectedProducts([]);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Wywołujemy /api/products/add
+  const addDetectedProductToFridge = async (label) => {
+    try {
+      const resp = await fetch(`${API_URL}/products/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: label,       // np. "Apple"
+          quantity: 1,
+          category: 'Fruits' // dowolnie
+        })
+      });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        Alert.alert("Sukces", `Dodano produkt: ${label}`);
+        // Ewentualnie dodaj do lokalnego stanu
+        addProduct && addProduct({
+          id: new Date().toISOString(), // pseudo-id
+          name: label,
+          category: 'Fruits',
+          date: new Date().toISOString()
+        });
+      } else {
+        Alert.alert("Błąd", data?.error || "Nie udało się dodać produktu");
+      }
+    } catch (error) {
+      console.error('Error adding product:', error);
+      Alert.alert("Błąd", "Nie udało się dodać produktu do bazy");
+    }
+  };
+
+  const handleBoxPress = (label) => {
+    setSelectedLabel(label);
+    setShowProductInfo(true);
+  };
+
+  const confirmAddToFridge = () => {
+    if (selectedLabel) {
+      addDetectedProductToFridge(selectedLabel);
+    }
+    setShowProductInfo(false);
+    setSelectedLabel(null);
+  };
+
+  const toggleCameraFacing = () => {
+    // Logika zmiany kamery, jeśli jest potrzebna
+    // np.: setFacing(facing === 'back' ? 'front' : 'back')
+  };
+
+  return (
+    <View style={styles.container}>
+      <Camera
+        ref={cameraRef}
+        style={styles.camera}
+        type={Camera.Constants.Type.back} // lub zmienna "facing"
+      >
+        {detectedProducts.map((product, index) => {
+          const boxStyle = {
+            position: 'absolute',
+            left: product.topLeft.x,
+            top: product.topLeft.y,
+            width: product.bottomRight.x - product.topLeft.x,
+            height: product.bottomRight.y - product.topLeft.y,
+            borderWidth: 2,
+            borderColor: '#DC143C',
+            backgroundColor: 'transparent'
+          };
+
+          return (
+            <TouchableOpacity
+              key={index}
+              style={boxStyle}
+              onPress={() => handleBoxPress(product.label)}
+            />
+          );
+        })}
+
+        <View style={styles.buttonContainer}>
+          <TouchableOpacity
+            style={[styles.button, isProcessing && styles.buttonDisabled]}
+            onPress={sendFrameToModel}
+            disabled={isProcessing}
+          >
+            {isProcessing ? (
+              <ActivityIndicator color="#000" />
+            ) : (
+              <Text style={styles.text}>Rozpoznaj</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.flipButton}
+            onPress={toggleCameraFacing}
+          >
+            <Text style={styles.text}>Odwróć</Text>
+          </TouchableOpacity>
+        </View>
+      </Camera>
+
+      <Modal
+        visible={showProductInfo}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowProductInfo(false)}
+      >
+        <TouchableWithoutFeedback onPress={() => setShowProductInfo(false)}>
+          <View style={styles.modalOverlay}>
+            <TouchableWithoutFeedback>
+              <View style={styles.modalContent}>
+                {selectedLabel && (
+                  <>
+                    <Text style={styles.modalTitle}>{selectedLabel}</Text>
+                    <TouchableOpacity
+                      style={styles.addButton}
+                      onPress={confirmAddToFridge}
+                    >
+                      <Text style={styles.addButtonText}>Dodaj do lodówki</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  message: {
+    textAlign: 'center',
+    paddingBottom: 10,
+  },
+  camera: {
+    flex: 1,
+  },
+  buttonContainer: {
+    flex: 1,
+    backgroundColor: 'transparent',
+    flexDirection: 'row',
+    margin: 20,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+  button: {
+    backgroundColor: 'white',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 25,
+    alignItems: 'center',
+    minWidth: 100,
+  },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  flipButton: {
+    backgroundColor: 'white',
+    padding: 15,
+    borderRadius: 10,
+    marginBottom: 25,
+    alignItems: 'center',
+    minWidth: 80,
+  },
+  text: {
+    fontSize: 18,
+    color: 'black',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    width: '80%',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 15,
+  },
+  addButton: {
+    backgroundColor: '#f4511e',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 15,
+  },
+  addButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: '500',
+  }
+});
+
+
+// app/screens/HomeScreen.js
+
+import React, { useEffect, useState } from 'react';
+import { View, StyleSheet, FlatList, TouchableOpacity, Text, Alert } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+
+// Tu zdefiniuj swój adres serwera
+const API_URL = 'http://192.168.1.237:5000/api';
+
+export default function HomeScreen({ navigation }) {
+  const [fridgeItems, setFridgeItems] = useState([]);
+
+  // Po załadowaniu ekranu (pierwsze wejście) pobiera zawartość lodówki
+  useEffect(() => {
+    fetchFridgeItems();
+  }, []);
+
+  const fetchFridgeItems = async () => {
+    try {
+      const response = await fetch(`${API_URL}/fridge`);
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      const data = await response.json();
+      setFridgeItems(data);
+    } catch (error) {
+      console.error('Error fetching fridge items:', error);
+      Alert.alert("Błąd", "Nie udało się pobrać zawartości lodówki");
+    }
+  };
+
+  const removeItemFromFridge = async (productId) => {
+    try {
+      const response = await fetch(`${API_URL}/fridge/${productId}`, {
+        method: 'DELETE'
+      });
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+      Alert.alert("Sukces", "Usunięto produkt z lodówki");
+      // odśwież listę
+      fetchFridgeItems();
+    } catch (error) {
+      console.error('Error removing item:', error);
+      Alert.alert("Błąd", "Nie udało się usunąć produktu");
+    }
+  };
+
+  const renderItem = ({ item }) => (
+    <View style={styles.itemContainer}>
+      <Text style={styles.itemText}>{item.name} (x{item.quantity})</Text>
+      <TouchableOpacity
+        style={styles.deleteButton}
+        onPress={() => removeItemFromFridge(item.id)}
+      >
+        <Ionicons name="trash" size={20} color="white" />
+      </TouchableOpacity>
+    </View>
+  );
+
+  return (
+    <View style={styles.container}>
+      <FlatList
+        data={fridgeItems}
+        renderItem={renderItem}
+        keyExtractor={item => item.id.toString()}
+        contentContainerStyle={styles.list}
+      />
+
+      {/* Przycisk do odświeżania – wywołuje fetchFridgeItems */}
+      <TouchableOpacity
+        style={styles.refreshButton}
+        onPress={fetchFridgeItems}
+      >
+        <Ionicons name="refresh" size={28} color="white" />
+      </TouchableOpacity>
+
+      {/* Przycisk do kamery (YOLO) */}
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={() => navigation.navigate('Camera')}
+      >
+        <Ionicons name="camera" size={30} color="white" />
+      </TouchableOpacity>
+
+      {/* Przycisk do ręcznego dodawania produktu */}
+      <TouchableOpacity
+        style={styles.fab2}
+        onPress={() => navigation.navigate('AddProduct')}
+      >
+        <Ionicons name="add" size={30} color="white" />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  list: {
+    padding: 16,
+  },
+  itemContainer: {
+    flexDirection: 'row',
+    marginBottom: 12,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#f2f2f2',
+    padding: 8,
+    borderRadius: 4
+  },
+  itemText: {
+    fontSize: 16,
+  },
+  deleteButton: {
+    backgroundColor: '#dc143c',
+    padding: 8,
+    borderRadius: 4,
+  },
+  // Nowy przycisk Refresh (FAB z ikoną "refresh")
+  refreshButton: {
+    position: 'absolute',
+    right: 20,
+    bottom: 160, // umieszczamy nieco wyżej niż pozostałe FAB-y
+    backgroundColor: '#007AFF',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+  },
+  fab: {
+    position: 'absolute',
+    right: 20,
+    bottom: 90,
+    backgroundColor: '#f4511e',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+  },
+  fab2: {
+    position: 'absolute',
+    right: 20,
+    bottom: 20,
+    backgroundColor: '#f4511e',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 4,
+  },
+});
+
+
+// app/screens/AddProductScreen.js
+
+import React, { useState } from 'react';
+import { View, Text, TextInput, Button, Alert, StyleSheet } from 'react-native';
+
+const API_URL = 'http://192.168.1.237:5000/api';
+
+export default function AddProductScreen({ navigation }) {
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState('General');
+  const [quantity, setQuantity] = useState('1');
+
+  const handleAddProduct = async () => {
+    try {
+      const response = await fetch(`${API_URL}/products/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          category,
+          quantity: parseFloat(quantity),
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Network response was not ok');
+      }
+
+      const data = await response.json();
+      Alert.alert("Sukces", "Produkt został dodany do bazy i lodówki");
+      navigation.goBack(); // wróć do poprzedniego ekranu
+    } catch (error) {
+      console.error('Error adding product:', error);
+      Alert.alert("Błąd", "Nie udało się dodać produktu");
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <Text style={styles.label}>Nazwa produktu:</Text>
+      <TextInput
+        value={name}
+        onChangeText={setName}
+        style={styles.input}
+        placeholder="Np. Apple"
+      />
+
+      <Text style={styles.label}>Kategoria:</Text>
+      <TextInput
+        value={category}
+        onChangeText={setCategory}
+        style={styles.input}
+        placeholder="Np. Fruits"
+      />
+
+      <Text style={styles.label}>Ilość:</Text>
+      <TextInput
+        value={quantity}
+        onChangeText={setQuantity}
+        style={styles.input}
+        keyboardType="numeric"
+        placeholder="Np. 2"
+      />
+
+      <Button title="Dodaj produkt" onPress={handleAddProduct} />
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    padding: 20
+  },
+  label: {
+    marginVertical: 8,
+    fontSize: 16,
+    fontWeight: 'bold'
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 4,
+    padding: 8,
+    marginBottom: 12
+  }
+});
+
+
+// App.js
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import HomeScreen from './app/screens/HomeScreen';
+import CameraScreen from './app/screens/CameraScreen';
+import AddProductScreen from './app/screens/AddProductScreen'; // nowy import
+import { ProductsProvider } from './components/ProductsContext';
+import { StatusBar } from 'expo-status-bar';
+
+const Stack = createNativeStackNavigator();
+
+export default function App() {
+  return (
+    <ProductsProvider>
+      <NavigationContainer>
+        <Stack.Navigator>
+          <Stack.Screen
+            name="Home"
+            component={HomeScreen}
+            options={{
+              title: 'Moja Lodówka',
+              headerStyle: {
+                backgroundColor: '#f4511e',
+              },
+              headerTintColor: '#fff',
+            }}
+          />
+          <Stack.Screen
+            name="Camera"
+            component={CameraScreen}
+            options={{
+              title: 'Dodaj Produkt (Kamera)',
+              headerStyle: {
+                backgroundColor: '#f4511e',
+              },
+              headerTintColor: '#fff',
+            }}
+          />
+          <Stack.Screen
+            name="AddProduct"
+            component={AddProductScreen}
+            options={{
+              title: 'Dodaj Produkt (Ręcznie)',
+              headerStyle: {
+                backgroundColor: '#f4511e',
+              },
+              headerTintColor: '#fff',
+            }}
+          />
+        </Stack.Navigator>
+        <StatusBar style="auto" />
+      </NavigationContainer>
+    </ProductsProvider>
+  );
+}

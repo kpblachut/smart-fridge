@@ -1,20 +1,20 @@
-from flask import Flask, request, Response, jsonify
-from flask_sqlalchemy import SQLAlchemy
+from flask import Flask, request, jsonify
 import cv2
 import numpy as np
+from flask_sqlalchemy import SQLAlchemy
 from ultralytics import YOLO
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'  # SQLite jako baza danych
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = True
 db = SQLAlchemy(app)
 
 # Modele baz danych
 class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    category = db.Column(db.String(50))
-    added_date = db.Column(db.Date, default=db.func.current_date)
+    #category = db.Column(db.String(50))
+    #added_date = db.Column(db.Date, default=db.func.current_date)
 
 class Recipe(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -27,7 +27,7 @@ class Fridge(db.Model):
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
     status = db.Column(db.String(50), nullable=False)
     quantity = db.Column(db.Numeric(10, 2), nullable=False)
-    added_date = db.Column(db.Date, default=db.func.current_date)
+    #added_date = db.Column(db.Date, default=db.func.current_date)
 
     __table_args__ = (
         db.CheckConstraint("status IN ('available', 'used', 'restored')", name="status_check"),
@@ -40,8 +40,8 @@ class RecipeProduct(db.Model):
     quantity = db.Column(db.Numeric(10, 2), nullable=False)
     unit = db.Column(db.String(50))
 
-# YOLO model
-model = YOLO('best.pt')
+# Inicjalizacja YOLO
+model = YOLO('best.pt')  # Podmień na właściwą ścieżkę do Twojego modelu
 
 @app.before_request
 def create_tables():
@@ -49,48 +49,111 @@ def create_tables():
         db.create_all()
         app.db_initialized = True
 
-@app.route('/video_feed', methods=['POST'])
-def video_feed():
-    file = request.files['frame']
+@app.route('/api/products/add', methods=['POST'])
+def add_product():
+    data = request.json
+    name = data.get('name')
+    #category = data.get('category', 'General')
+    quantity = data.get('quantity', 1.0)
+
+    if not name:
+        return jsonify({'error': 'Product name is required'}), 400
+
+    # Spróbuj znaleźć produkt
+    product = Product.query.filter_by(name=name).first()
+    if not product:
+        # Stwórz nowy
+        product = Product(name=name)
+        db.session.add(product)
+        db.session.commit()
+
+    # Tu zawsze tworzysz nowy wiersz w Fridge (jeśli tak chcesz):
+    fridge_item = Fridge(product_id=product.id, status='available', quantity=quantity)
+    db.session.add(fridge_item)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Product added to fridge',
+        'product': {
+            'name': product.name,
+            'quantity': quantity
+        }
+    }), 200
+
+@app.route('/api/fridge', methods=['GET'])
+def get_fridge():
+    """
+    Pobierz wszystkie produkty w lodówce.
+    """
+    fridge_items = Fridge.query.filter_by(status='available').all()
+    result = []
+    for item in fridge_items:
+        product = Product.query.get(item.product_id)
+        result.append({
+            'id': item.id,
+            'name': product.name,
+            # 'category': product.category,
+            'quantity': float(item.quantity),
+            # 'added_date': item.added_date.isoformat()
+        })
+
+    return jsonify(result), 200
+
+@app.route('/api/fridge/<int:product_id>', methods=['DELETE'])
+def remove_from_fridge(product_id):
+    """
+    Usuń produkt z lodówki na podstawie ID produktu.
+    """
+    fridge_item = Fridge.query.filter_by(product_id=product_id, status='available').first()
+    if not fridge_item:
+        return jsonify({'error': 'Product not found in fridge'}), 404
+
+    db.session.delete(fridge_item)
+    db.session.commit()
+
+    return jsonify({'message': 'Product removed from fridge'}), 200
+
+@app.route('/detect', methods=['POST'])
+def detect():
+    """
+    Odbiera obraz z kamery (plik 'image') i zwraca wykryte obiekty (etykieta, pewność i koordynaty).
+    Nie dodaje produktu do bazy – to robi osobny endpoint /api/products/add.
+    """
+    if 'image' not in request.files:
+        return jsonify({'error': 'No image file found'}), 400
+
+    file = request.files['image']
     in_frame = np.frombuffer(file.read(), np.uint8)
     frame = cv2.imdecode(in_frame, cv2.IMREAD_COLOR)
 
-    # Process the frame with YOLO
     results = model(frame)
+    detections_data = []
+
     for detection in results[0].boxes:
-        label = detection.cls.tolist()[0]  # Klasa
-        confidence = detection.conf.tolist()[0]
+        x1, y1, x2, y2 = detection.xyxy.tolist()[0]
+        label_idx = int(detection.cls.tolist()[0])
+        confidence = float(detection.conf.tolist()[0])
 
-        # Przykład: Użycie label jako nazwy produktu
-        product_name = f"Product_{int(label)}"
-
-        # Dodaj produkt do bazy, jeśli nie istnieje
-        product = Product.query.filter_by(name=product_name).first()
-        if not product:
-            product = Product(name=product_name, category="General")
-            db.session.add(product)
-            db.session.commit()
-
-        # Dodaj produkt do lodówki
-        fridge_item = Fridge.query.filter_by(product_id=product.id).first()
-        if fridge_item:
-            fridge_item.quantity += 1  # Zwiększ ilość (przykładowo)
+        # Nazwa klasy z modelu (jeśli jest dostępna)
+        if hasattr(model, 'names') and label_idx in model.names:
+            class_name = model.names[label_idx]
         else:
-            # Użytkownik podaje ilość i jednostkę
-            quantity = float(request.form.get('quantity', 1.0))
-            fridge_item = Fridge(product_id=product.id, status="available", quantity=quantity)
-            db.session.add(fridge_item)
-        db.session.commit()
+            class_name = f"Product_{label_idx}"
 
-    return jsonify({'message': 'Products processed and added to fridge.'})
+        detections_data.append({
+            'label': class_name,
+            'confidence': confidence,
+            'topLeft': {'x': x1, 'y': y1},
+            'bottomRight': {'x': x2, 'y': y2}
+        })
+
+    return jsonify(detections_data), 200
 
 @app.route('/recipes', methods=['GET'])
 def get_recipes():
-    # Pobierz wszystkie produkty z lodówki
     fridge_items = Fridge.query.filter_by(status="available").all()
     fridge_dict = {item.product_id: item.quantity for item in fridge_items}
 
-    # Znajdź przepisy, które mogą być wykonane
     recipes = Recipe.query.all()
     possible_recipes = []
 
